@@ -5,7 +5,7 @@ const ansi = @import("./ansi.zig");
 const yazap = @import("yazap");
 
 const HEX_LINE_LEN = 2048;
-const HexLineData = struct { offset: usize, buf: []u8, valid_bytes: usize };
+const HexLineData = struct { offset: usize, end_offset: usize, buf: []u8, valid_bytes: usize };
 const HexLineStr = [HEX_LINE_LEN]u8;
 
 fn SequentialLineFormatter(comptime T: type) type {
@@ -46,7 +46,7 @@ pub fn format_hex_line(data: *HexLineData, out_str: *HexLineStr) !void {
     // Hex bytes
     var i: usize = 0;
     while (i < 16) : (i += 1) {
-        if (i < data.valid_bytes) {
+        if (i < data.valid_bytes and data.offset + i <= data.end_offset) {
             switch (data.buf[i]) {
                 0x00...0x19 => _ = try formatter.bufPrint(" {x:0>2}", .{data.buf[i]}),
                 0x20...0x7e => _ = try formatter.bufPrint(" {s}{s}{x:0>2}{s}", .{ ansi.UNDERLINE, ansi.YELLOW, data.buf[i], ansi.NORMAL }),
@@ -61,7 +61,7 @@ pub fn format_hex_line(data: *HexLineData, out_str: *HexLineStr) !void {
     // ASCII section
     i = 0;
     while (i < 16) : (i += 1) {
-        if (i < data.valid_bytes) {
+        if (i < data.valid_bytes and data.offset + i <= data.end_offset) {
             switch (data.buf[i]) {
                 0x00...0x19 => _ = try formatter.bufPrint(".", .{}),
                 0x20...0x7e => _ = try formatter.bufPrint("{s}{c}{s}", .{ ansi.YELLOW, data.buf[i], ansi.NORMAL }),
@@ -106,6 +106,21 @@ pub fn main() !void {
         };
     }
 
+    var end_offset: usize = std.math.maxInt(usize);
+    if (matches.getSingleValue("end")) |end| {
+        end_offset = std.fmt.parseInt(usize, end, 16) catch brk: {
+            std.debug.print("Error: Invalid end offset supplied: {s}\n", .{end});
+            try app.displayHelp();
+            std.os.exit(1);
+            break :brk 0;
+        };
+    }
+
+    if (end_offset < offset) {
+        std.debug.print("Error: End offset cannot come before the start (start={x} end={x})\n", .{ offset, end_offset });
+        std.os.exit(1);
+    }
+
     const absolute_path = try get_bin_filepath(allocator, matches.getSingleValue("input").?);
     defer allocator.free(absolute_path);
 
@@ -124,8 +139,12 @@ pub fn main() !void {
     try file.seekTo(offset);
     const file_reader = file.reader();
 
-    var hex_line_data = HexLineData{ .offset = offset, .buf = buf16, .valid_bytes = 0 };
+    var hex_line_data = HexLineData{ .offset = offset, .end_offset = end_offset, .buf = buf16, .valid_bytes = 0 };
     while (true) {
+        if (offset > end_offset) {
+            break;
+        }
+
         const bytes_read = try file_reader.read(buf16);
         if (bytes_read == 0) {
             break;
