@@ -2,6 +2,8 @@ const std = @import("std");
 const Allocator = @import("std").mem.Allocator;
 const ansi = @import("./ansi.zig");
 
+const yazap = @import("yazap");
+
 const HEX_LINE_LEN = 2048;
 const HexLineData = struct { offset: usize, buf: []u8, valid_bytes: usize };
 const HexLineStr = [HEX_LINE_LEN]u8;
@@ -20,7 +22,7 @@ fn SequentialLineFormatter(comptime T: type) type {
     };
 }
 
-pub fn get_bin_filepath(allocator: Allocator, path: []u8) ![]u8 {
+pub fn get_bin_filepath(allocator: Allocator, path: []const u8) ![]u8 {
     if (std.fs.path.isAbsolute(path)) {
         const absolute_path = try allocator.alloc(u8, path.len);
         @memcpy(absolute_path, path);
@@ -32,14 +34,9 @@ pub fn get_bin_filepath(allocator: Allocator, path: []u8) ![]u8 {
     }
 }
 
-pub fn print_usage_and_exit(prog_name: []u8, exit_code: u8) void {
-    std.debug.print("usage: {s} <file> [--start=offset]\n", .{prog_name});
-    std.os.exit(exit_code);
-}
-
-pub fn write_hex_line(data: HexLineData, out_str: *HexLineStr) !void {
+pub fn format_hex_line(data: *HexLineData, out_str: *HexLineStr) !void {
     // Clear the buffer
-    out_str.* = std.mem.zeroes(HexLineStr);
+    @memset(out_str, 0);
 
     var formatter = SequentialLineFormatter(*HexLineStr){ .out_str = out_str };
 
@@ -84,13 +81,32 @@ pub fn main() !void {
         _ = gpa.deinit();
     }
 
-    var args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-    if (args.len < 2) {
-        print_usage_and_exit(args[0], 1);
+    var app = yazap.App.init(allocator, "bw2", "Bewitched2 Hex Dumper");
+    defer app.deinit();
+    var bw2 = app.rootCommand();
+
+    try bw2.addArg(yazap.Arg.positional("input", null, null));
+    try bw2.addArg(yazap.Arg.singleValueOption("start", 's', "Start offset (hex)"));
+    try bw2.addArg(yazap.Arg.singleValueOption("end", 'e', "End offset (hex)"));
+
+    const matches = try app.parseProcess();
+
+    if (!matches.containsArgs() or matches.getSingleValue("input") == null) {
+        try app.displayHelp();
+        return;
     }
 
-    const absolute_path = try get_bin_filepath(allocator, args[1]);
+    var offset: usize = 0;
+    if (matches.getSingleValue("start")) |start| {
+        offset = std.fmt.parseInt(usize, start, 16) catch brk: {
+            std.debug.print("Error: Invalid start offset supplied: {s}\n", .{start});
+            try app.displayHelp();
+            std.os.exit(1);
+            break :brk 0;
+        };
+    }
+
+    const absolute_path = try get_bin_filepath(allocator, matches.getSingleValue("input").?);
     defer allocator.free(absolute_path);
 
     const file = try std.fs.openFileAbsolute(absolute_path, .{ .lock = std.fs.File.Lock.exclusive });
@@ -105,17 +121,22 @@ pub fn main() !void {
     var buffered = std.io.bufferedWriter(out);
     var writer = buffered.writer();
 
-    var offset: usize = 0;
     try file.seekTo(offset);
     const file_reader = file.reader();
+
+    var hex_line_data = HexLineData{ .offset = offset, .buf = buf16, .valid_bytes = 0 };
     while (true) {
         const bytes_read = try file_reader.read(buf16);
         if (bytes_read == 0) {
             break;
         }
 
-        try write_hex_line(.{ .offset = offset, .buf = buf16, .valid_bytes = bytes_read }, &hex_line);
+        hex_line_data.valid_bytes = bytes_read;
+        hex_line_data.offset = offset;
+
+        try format_hex_line(&hex_line_data, &hex_line);
         try writer.print("{s}\n", .{hex_line});
+
         offset += bytes_read;
     }
     try buffered.flush();
